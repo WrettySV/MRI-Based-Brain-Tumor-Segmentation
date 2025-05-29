@@ -16,8 +16,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f'Using device: {device}')
 
 # Constants
-CHECKPOINT_PATH = 'model_checkpoints/checkpoint_epoch_19.pt'
-NUM_EXAMPLES = 3  # Number of examples to show
+CHECKPOINT_PATH = 'model_checkpoints_unet_4/checkpoint_epoch_19.pt'
+NUM_EXAMPLES = 8  # Number of examples to show
 USE_VALIDATION = True  # Set to True to use validation data, False for training data
 
 # Define segmentation classes and their colors
@@ -46,32 +46,17 @@ def load_model(checkpoint_path):
 
 def dice_coefficient(y_pred, y_true, smooth=1e-6):
     """
-    Calculate Dice coefficient
-    
-    Args:
-        y_pred: Model output [batch_size, n_classes, height, width]
-        y_true: Ground truth [batch_size, n_classes, height, width] (one-hot encoded)
-        smooth: Smoothing factor
+    Calculate Dice coefficient for each class
     """
-    # Convert predictions to probabilities
     y_pred = F.softmax(y_pred, dim=1)
-    
-    # Ensure tensors are on the same device
     y_true = y_true.to(y_pred.device)
-    
-    # Reshape tensors to [batch_size, n_classes, -1]
     y_pred = y_pred.view(y_pred.size(0), y_pred.size(1), -1)
     y_true = y_true.view(y_true.size(0), y_true.size(1), -1)
-    
-    # Calculate intersection and union
     intersection = (y_pred * y_true).sum(dim=2)
     union = y_pred.sum(dim=2) + y_true.sum(dim=2)
-    
-    # Calculate Dice coefficient for each class
     dice = (2. * intersection + smooth) / (union + smooth)
-    
-    # Return mean Dice coefficient across all classes
-    return dice.mean()
+    # dice: shape [batch, n_classes]
+    return dice[0]  # Dice for first sample in batch
 
 def find_interesting_slices(dataset, num_slices=3):
     """Find slices with most classes or closest to center"""
@@ -115,7 +100,7 @@ def main():
     # Create dataset and dataloader
     print("Creating dataset...")
     dataset = BrainTumorDataset(
-        list_IDs=['BraTS20_Training_367'],  # You can change this to any case ID
+        list_IDs=['BraTS20_Training_356'],  # You can change this to any case ID
         dim=(128, 128),
         n_channels=4,
         slices_per_volume=16,
@@ -155,8 +140,13 @@ def main():
             print(f"Max probability per class: {max_probs[0]}")
             
             # Calculate metrics
-            dice = dice_coefficient(outputs, y).item()
-            print(f"Dice coefficient for this case: {dice:.4f}")
+            dice_per_class = dice_coefficient(outputs, y).cpu().numpy().flatten()
+            mean_dice = dice_per_class.mean()
+            if len(dice_per_class) >= 4:
+                print(f"Dice per class: NCR/NET={dice_per_class[1]:.4f}, ED={dice_per_class[2]:.4f}, ET={dice_per_class[3]:.4f}")
+            else:
+                print(f"Dice per class: {dice_per_class}")
+            print(f"Mean Dice: {mean_dice:.4f}")
             
             # Show predictions and ground truth
             plt.figure(figsize=(25, 10))
@@ -181,7 +171,6 @@ def main():
                 mask = (torch.argmax(y[0], dim=0) == i+1).cpu()
                 plt.imshow(mask, cmap='hot')
                 plt.title(f'Ground Truth Class {i+1}')
-                plt.colorbar()
             
             # Second row: Predictions
             # Original FLAIR (same as above)
@@ -202,16 +191,32 @@ def main():
                 mask = (predictions[0] == i+1).cpu()
                 plt.imshow(mask, cmap='hot')
                 plt.title(f'Predicted Class {i+1}')
-                plt.colorbar()
             
-            # Add legend for segmentation classes
-            legend_elements = [Patch(facecolor=color, label=label, edgecolor='black', linewidth=1) 
-                             for label, color in seg_classes.values()]
-            plt.figlegend(handles=legend_elements, 
-                         loc='center right',
-                         bbox_to_anchor=(0.98, 0.5),
-                         fontsize=10)
-            
+            # Create a colored legend with Dice metrics in the labels
+            if len(dice_per_class) >= 4:
+                legend_elements = [
+                    Patch(facecolor='black', label=f'Background'),
+                    Patch(facecolor='blue', label=f'NCR/NET  Dice: {dice_per_class[1]:.4f}'),
+                    Patch(facecolor='green', label=f'ED       Dice: {dice_per_class[2]:.4f}'),
+                    Patch(facecolor='red', label=f'ET       Dice: {dice_per_class[3]:.4f}')
+                ]
+                mean_label = f"Mean Dice: {mean_dice:.4f}"
+            else:
+                legend_elements = []
+                mean_label = f"Dice per class: {dice_per_class}\nMean: {mean_dice:.4f}"
+            leg = plt.figlegend(
+                handles=legend_elements,
+                loc='lower left',
+                bbox_to_anchor=(0.02, 0.02),  # very left, very bottom
+                fontsize=12,
+                frameon=True,
+                title=mean_label
+            )
+            leg.get_frame().set_facecolor('white')
+            leg.get_frame().set_alpha(0.9)
+            leg.get_frame().set_edgecolor('black')
+            leg.get_frame().set_linewidth(1.5)
+
             plt.tight_layout()
             plt.savefig(f'visualization_segmentation_{case_id}_slice_{slice_idx}.png', dpi=300, bbox_inches='tight')
             plt.close()
